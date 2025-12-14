@@ -28,19 +28,20 @@ RUN python -m spacy download en_core_web_sm
 # 4. Create a non-root user (Required for Hugging Face)
 RUN useradd -m -u 1000 user
 
-# 5. Copy the rest of the application code & Fix Permissions
-COPY --chown=user . .
+# 5. Fix Permissions BEFORE switching user
+# Create the folders as root, then give them to the user
+RUN mkdir -p /app/chroma_global_db
+RUN mkdir -p /data
+RUN chown -R 1000:1000 /app
+RUN chown -R 1000:1000 /data
 
-# 6. Ensure the user can write to the DB directories
-# We create the folder and give the user ownership
-RUN mkdir -p chroma_global_db && chown -R user:user chroma_global_db
-# We also ensure the /app directory is writable for the sqlite file
-RUN chown -R user:user /app
-
-# 7. Switch to the non-root user
+# 6. Switch to the non-root user
 USER user
 
-# 8. Expose the port Chainlit runs on
+# 7. Copy the application code
+COPY --chown=user . .
+
+# 8. Expose the port
 EXPOSE 7860
 
 # 9. Run the application
