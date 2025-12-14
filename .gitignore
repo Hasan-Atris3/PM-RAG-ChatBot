@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Chainlit
+.chainlit/
+
+# ChromaDB
+chroma_db*/
+chroma_*/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+cedropass.db
+
+# Data files (uncomment if you don't want to track these)
+# *.csv
+# *.xlsx
+# *.pdf
+# *.jpg
+# *.png
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+.files/
+*.tmp
+*.temp
+
+# Results and outputs
+results.txt
