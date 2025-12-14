@@ -22,19 +22,26 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 3. Download the Spacy model during build to save time on startup
+# 3. Download the Spacy model during build
 RUN python -m spacy download en_core_web_sm
 
-# 4. Copy the rest of the application code
-COPY . .
+# 4. Create a non-root user (Required for Hugging Face)
+RUN useradd -m -u 1000 user
 
-# 5. Create the directory for the global DB if it doesn't exist
-RUN mkdir -p chroma_global_db
-RUN chmod -R 777 chroma_global_db
+# 5. Copy the rest of the application code & Fix Permissions
+COPY --chown=user . .
 
-# 6. Expose the port Chainlit runs on
+# 6. Ensure the user can write to the DB directories
+# We create the folder and give the user ownership
+RUN mkdir -p chroma_global_db && chown -R user:user chroma_global_db
+# We also ensure the /app directory is writable for the sqlite file
+RUN chown -R user:user /app
+
+# 7. Switch to the non-root user
+USER user
+
+# 8. Expose the port Chainlit runs on
 EXPOSE 7860
 
-# 7. Run the application
-# Chainlit on HuggingFace must run on port 7860
+# 9. Run the application
 CMD ["chainlit", "run", "app.py", "--host", "0.0.0.0", "--port", "7860"]
