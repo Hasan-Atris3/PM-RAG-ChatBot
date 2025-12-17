@@ -147,7 +147,7 @@ class DiagramInterpreter:
                     b64 = base64.b64encode(buf.getvalue()).decode()
 
                     resp = self._anthropic.messages.create(
-                        model="claude-sonnet-4-5-20250929", 
+                        model=os.getenv("CLAUDE_VISION_MODEL", "claude-sonnet-4-5-20250929"),
                         max_tokens=600,
                         temperature=0.2,
                         messages=[
@@ -190,8 +190,8 @@ class SmartKnowledgeBase(SRDChatbotEngine):
     def __init__(self, chroma_dir="chroma_global_db"):
         super().__init__(chroma_dir)
         self.current_project_id: Optional[str] = None
-        self.current_chat_id: Optional[str] = None   
-        self.current_user_id: Optional[str] = None   
+        self.current_chat_id: Optional[str] = None   # ✅ NEW
+        self.current_user_id: Optional[str] = None   # ✅ NEW
 
         self.vectorstore = Chroma(
             persist_directory=chroma_dir,
@@ -221,22 +221,13 @@ class SmartKnowledgeBase(SRDChatbotEngine):
         if not self.current_user_id:
             raise RuntimeError("User not set. Call set_current_user(...) first.")
 
-    #SCOPE INCLUDES GLOBAL KNOWLEDGE
     def _where_scope(self) -> dict:
+        # Chroma where filter (strict isolation)
         return {
-            "$or": [
-                # 1. The User's specific Project Data
-                {
-                    "$and": [
-                        {"project_id": {"$eq": self.current_project_id}},
-                        {"chat_id": {"$eq": self.current_chat_id}},
-                        {"user_id": {"$eq": self.current_user_id}},
-                    ]
-                },
-                # 2. The Global Expert Knowledge
-                {
-                    "project_id": {"$eq": "GLOBAL_KNOWLEDGE"}
-                }
+            "$and": [
+                {"project_id": {"$eq": self.current_project_id}},
+                {"chat_id": {"$eq": self.current_chat_id}},
+                {"user_id": {"$eq": self.current_user_id}},
             ]
         }
 
@@ -378,9 +369,9 @@ class SmartKnowledgeBase(SRDChatbotEngine):
         return "functional"
 
     # ------------------------------
-    # SMART RESPONSE (MODE AWARE & ADAPTIVE)
+    # SMART RESPONSE (CHAT-ISOLATED)
     # ------------------------------
-    def generate_smart_response(self, query: str, claude: ClaudeAnswerer, mode: str = "standard") -> str:
+    def generate_smart_response(self, query: str, claude: ClaudeAnswerer) -> str:
         self._require_scope()
 
         intent = self.detect_intent(query)
@@ -399,9 +390,9 @@ class SmartKnowledgeBase(SRDChatbotEngine):
                     ]
                 }
             )
+
             docs = raw.get("documents", []) or []
 
-            # Fallback logic
             if not docs and req_type == "nonfunctional":
                 raw2 = self.vectorstore.get(
                     where={
@@ -422,43 +413,18 @@ class SmartKnowledgeBase(SRDChatbotEngine):
 
             title = "FUNCTIONAL REQUIREMENTS" if req_type == "functional" else "NON-FUNCTIONAL REQUIREMENTS"
 
-            # ----------------------------------------------------
-            # MODE SWITCH: ENUMERATION
-            # ----------------------------------------------------
-            if mode == "architect":
-                # PRO MODE: Forces maximum detail regardless of phrasing
-                prompt = f"""
-You are a Senior Project Architect.
-TASK: Provide a DETAILED, COMPREHENSIVE list of {title}.
-1. Do not summarize. Include full text and rationale for every item found.
-2. If the document has implementation details, include them.
-
-REQUIREMENTS SOURCE:
-{chr(10).join(docs)}
-"""
-            else:
-                # STANDARD MODE: Semantic / Adaptive
-                prompt = f"""
+            prompt = f"""
 You are a Senior Project Architect.
 
-CONTEXT (The Requirements):
+Return a COMPLETE numbered list of the {title} found below.
+Do NOT invent items. Do NOT omit items. If duplicates exist, keep only one copy.
+
+REQUIREMENTS:
 {chr(10).join(docs)}
-
-USER QUERY: "{query}"
-
-TASK:
-List the {title} found in the context above.
-
-CRITICAL INSTRUCTION ON LENGTH:
-Use your semantic understanding of the USER QUERY to determine the output format:
-1. **Brevity**: If the user asks for "just a list", "titles only", "briefly", or "no explanation", output ONLY the ID and Name (e.g., "FR-01: User Login").
-2. **Detail**: If the user asks for "details", "full requirements", "comprehensive", or "explain", provide the full text/rationale for each.
-3. **Default**: If the intent is neutral (e.g., "What are the requirements?"), provide the ID, Name, and a 1-sentence summary.
 """
-
             return claude.client.messages.create(
                 model=claude.model,
-                max_tokens=4000,
+                max_tokens=2500,
                 temperature=0.2,
                 messages=[{"role": "user", "content": prompt}],
             ).content[0].text
@@ -467,57 +433,31 @@ Use your semantic understanding of the USER QUERY to determine the output format
         docs = self.vectorstore.similarity_search(
             query,
             k=15,
-            filter=self._where_scope(),
+            filter=self._where_scope(),  # ✅ chat + user + project scoped
         )
 
         if not docs:
             return "I could not find sufficient information in the provided SRD."
 
         ctx = ""
-        for d in docs[:12]:
-            ctx += f"[{d.metadata.get('header', 'SRD Section')}]\n{d.page_content}\n---\n"
+        for d in docs[:8]:
+            ctx += f"[{d.metadata.get('header', 'SRD')}]\n{d.page_content}\n---\n"
 
-        # ----------------------------------------------------
-        # MODE SWITCH: QA
-        # ----------------------------------------------------
-        if mode == "architect":
-            # PRO MODE: Senior Architect
-            prompt = f"""
-You are a Senior Project Architect and Lead Developer.
-**MODE: PRO / SENIOR ARCHITECT**
-
-CONTEXT:
-{ctx}
-
-USER QUERY: "{query}"
-
-INSTRUCTIONS:
-1. **Depth**: Provide a COMPREHENSIVE, technical, and detailed answer.
-2. **Global Knowledge**: You are encouraged to apply [GLOBAL_KNOWLEDGE] rules (if present in context) to critique or enhance the project requirements.
-3. **Structure**: Use headers, bullet points, and bold text extensively.
-4. **Advice**: If the SRD is missing a standard security or architectural pattern, point it out.
-"""
-        else:
-            # STANDARD MODE: Adaptive
-            prompt = f"""
+        prompt = f"""
 You are a Senior Project Architect.
-**MODE: ADAPTIVE / STANDARD**
+
+Answer ONLY using the SRD context.
+If unsupported, say so explicitly.
 
 CONTEXT:
 {ctx}
 
-USER QUERY: "{query}"
-
-INSTRUCTIONS:
-Answer the USER QUERY based strictly on the CONTEXT.
-- **Analyze Intent**: If the user asks for a summary, keep it brief. If they ask for details, go deep.
-- **Scope**: Focus primarily on the Project Documents. Only use Global Knowledge if the user explicitly asks for "advice" or "best practices".
-- **Clarity**: Prioritize a clear, direct answer over a long one unless detailed technical info is requested.
+QUESTION:
+{query}
 """
-
         return claude.client.messages.create(
             model=claude.model,
-            max_tokens=3000,
+            max_tokens=2500,
             temperature=0.3,
             messages=[{"role": "user", "content": prompt}],
         ).content[0].text
