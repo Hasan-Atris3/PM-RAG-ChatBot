@@ -141,13 +141,14 @@ class DiagramInterpreter:
                         self._anthropic = Anthropic(api_key=api_key)
 
                 if self._anthropic:
+                    # ✅ FIXED MODEL NAME
                     safe_image = resize_for_claude(image)
                     buf = io.BytesIO()
                     safe_image.convert("RGB").save(buf, format="JPEG", quality=85)
                     b64 = base64.b64encode(buf.getvalue()).decode()
 
                     resp = self._anthropic.messages.create(
-                        model=os.getenv("CLAUDE_VISION_MODEL", "claude-sonnet-4-5-20250929"),
+                        model="claude-3-5-sonnet-20240620", 
                         max_tokens=600,
                         temperature=0.2,
                         messages=[
@@ -190,8 +191,8 @@ class SmartKnowledgeBase(SRDChatbotEngine):
     def __init__(self, chroma_dir="chroma_global_db"):
         super().__init__(chroma_dir)
         self.current_project_id: Optional[str] = None
-        self.current_chat_id: Optional[str] = None   # ✅ NEW
-        self.current_user_id: Optional[str] = None   # ✅ NEW
+        self.current_chat_id: Optional[str] = None   
+        self.current_user_id: Optional[str] = None   
 
         self.vectorstore = Chroma(
             persist_directory=chroma_dir,
@@ -221,13 +222,22 @@ class SmartKnowledgeBase(SRDChatbotEngine):
         if not self.current_user_id:
             raise RuntimeError("User not set. Call set_current_user(...) first.")
 
+    # ✅ UPDATED SCOPE TO INCLUDE GLOBAL KNOWLEDGE
     def _where_scope(self) -> dict:
-        # Chroma where filter (strict isolation)
         return {
-            "$and": [
-                {"project_id": {"$eq": self.current_project_id}},
-                {"chat_id": {"$eq": self.current_chat_id}},
-                {"user_id": {"$eq": self.current_user_id}},
+            "$or": [
+                # 1. The User's specific Project Data
+                {
+                    "$and": [
+                        {"project_id": {"$eq": self.current_project_id}},
+                        {"chat_id": {"$eq": self.current_chat_id}},
+                        {"user_id": {"$eq": self.current_user_id}},
+                    ]
+                },
+                # 2. The Global Expert Knowledge (Visible to everyone)
+                {
+                    "project_id": {"$eq": "GLOBAL_KNOWLEDGE"}
+                }
             ]
         }
 
@@ -393,6 +403,7 @@ class SmartKnowledgeBase(SRDChatbotEngine):
 
             docs = raw.get("documents", []) or []
 
+            # Fallback to general if specific type empty
             if not docs and req_type == "nonfunctional":
                 raw2 = self.vectorstore.get(
                     where={
@@ -414,17 +425,20 @@ class SmartKnowledgeBase(SRDChatbotEngine):
             title = "FUNCTIONAL REQUIREMENTS" if req_type == "functional" else "NON-FUNCTIONAL REQUIREMENTS"
 
             prompt = f"""
-You are a Senior Project Architect.
+You are a Senior Project Architect analyzing a Software Requirements Document (SRD).
 
-Return a COMPLETE numbered list of the {title} found below.
-Do NOT invent items. Do NOT omit items. If duplicates exist, keep only one copy.
+Your task is to provide a DETAILED and COMPREHENSIVE list of the {title} found below.
+1. Return a numbered list.
+2. For each requirement, preserve the full detail and context provided in the source.
+3. Do not summarize heavily; strictly output the requirements as defined.
+4. If duplicates exist, keep only one copy but maintain the most detailed version.
 
-REQUIREMENTS:
+REQUIREMENTS SOURCE:
 {chr(10).join(docs)}
 """
             return claude.client.messages.create(
                 model=claude.model,
-                max_tokens=1400,
+                max_tokens=2500,
                 temperature=0.2,
                 messages=[{"role": "user", "content": prompt}],
             ).content[0].text
@@ -432,22 +446,29 @@ REQUIREMENTS:
         # =============== NORMAL QA MODE ===============
         docs = self.vectorstore.similarity_search(
             query,
-            k=12,
-            filter=self._where_scope(),  # ✅ chat + user + project scoped
+            k=15,
+            filter=self._where_scope(),
         )
 
         if not docs:
             return "I could not find sufficient information in the provided SRD."
 
         ctx = ""
-        for d in docs[:8]:
-            ctx += f"[{d.metadata.get('header', 'SRD')}]\n{d.page_content}\n---\n"
+        for d in docs[:12]:
+            ctx += f"[{d.metadata.get('header', 'SRD Section')}]\n{d.page_content}\n---\n"
 
         prompt = f"""
-You are a Senior Project Architect.
+You are a Senior Project Architect and Lead Developer.
 
-Answer ONLY using the SRD context.
-If unsupported, say so explicitly.
+Provide a COMPREHENSIVE and DETAILED answer based strictly on the SRD context below.
+
+Guidelines:
+1. **Depth**: Explain concepts and requirements in detail.
+2. **Structure**: Use Markdown headers (##), bullet points, and bold text.
+3. **Completeness**: Cover all aspects found in the context.
+4. **Context**: Cite specific rules or logic from the text.
+
+If the context does not support the answer, explicitly state what is missing.
 
 CONTEXT:
 {ctx}
@@ -457,7 +478,7 @@ QUESTION:
 """
         return claude.client.messages.create(
             model=claude.model,
-            max_tokens=1000,
+            max_tokens=2500,
             temperature=0.3,
             messages=[{"role": "user", "content": prompt}],
         ).content[0].text
