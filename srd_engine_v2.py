@@ -233,7 +233,7 @@ class SmartKnowledgeBase(SRDChatbotEngine):
                         {"user_id": {"$eq": self.current_user_id}},
                     ]
                 },
-                # 2. The Global Expert Knowledge (Visible to everyone)
+                # 2. The Global Expert Knowledge
                 {
                     "project_id": {"$eq": "GLOBAL_KNOWLEDGE"}
                 }
@@ -378,18 +378,17 @@ class SmartKnowledgeBase(SRDChatbotEngine):
         return "functional"
 
     # ------------------------------
-    # SMART RESPONSE (SEMANTICALLY ADAPTIVE)
+    # SMART RESPONSE (MODE AWARE & ADAPTIVE)
     # ------------------------------
-    def generate_smart_response(self, query: str, claude: ClaudeAnswerer) -> str:
+    def generate_smart_response(self, query: str, claude: ClaudeAnswerer, mode: str = "standard") -> str:
         self._require_scope()
 
         intent = self.detect_intent(query)
 
-        # =============== ENUMERATION MODE (Adaptive List) ===============
+        # =============== ENUMERATION MODE ===============
         if intent == "enumeration":
             req_type = self.detect_requirement_type(query)
 
-            # (Standard retrieval logic)
             raw = self.vectorstore.get(
                 where={
                     "$and": [
@@ -402,7 +401,7 @@ class SmartKnowledgeBase(SRDChatbotEngine):
             )
             docs = raw.get("documents", []) or []
 
-            # Fallback logic...
+            # Fallback logic
             if not docs and req_type == "nonfunctional":
                 raw2 = self.vectorstore.get(
                     where={
@@ -423,8 +422,23 @@ class SmartKnowledgeBase(SRDChatbotEngine):
 
             title = "FUNCTIONAL REQUIREMENTS" if req_type == "functional" else "NON-FUNCTIONAL REQUIREMENTS"
 
-            # SEMANTIC PROMPT: We tell Claude to be the judge of the query submitted by the user instead of being hardcoded by us.
-            prompt = f"""
+            # ----------------------------------------------------
+            # MODE SWITCH: ENUMERATION
+            # ----------------------------------------------------
+            if mode == "architect":
+                # PRO MODE: Forces maximum detail regardless of phrasing
+                prompt = f"""
+You are a Senior Project Architect.
+TASK: Provide a DETAILED, COMPREHENSIVE list of {title}.
+1. Do not summarize. Include full text and rationale for every item found.
+2. If the document has implementation details, include them.
+
+REQUIREMENTS SOURCE:
+{chr(10).join(docs)}
+"""
+            else:
+                # STANDARD MODE: Semantic / Adaptive
+                prompt = f"""
 You are a Senior Project Architect.
 
 CONTEXT (The Requirements):
@@ -440,10 +454,8 @@ Use your semantic understanding of the USER QUERY to determine the output format
 1. **Brevity**: If the user asks for "just a list", "titles only", "briefly", or "no explanation", output ONLY the ID and Name (e.g., "FR-01: User Login").
 2. **Detail**: If the user asks for "details", "full requirements", "comprehensive", or "explain", provide the full text/rationale for each.
 3. **Default**: If the intent is neutral (e.g., "What are the requirements?"), provide the ID, Name, and a 1-sentence summary.
-
-Do not omit any requirements, just adjust the depth of each item.
 """
-            # We keep max_tokens HIGH (4000) to allow detail IF the semantic check decides it's needed.
+
             return claude.client.messages.create(
                 model=claude.model,
                 max_tokens=4000,
@@ -451,7 +463,7 @@ Do not omit any requirements, just adjust the depth of each item.
                 messages=[{"role": "user", "content": prompt}],
             ).content[0].text
 
-        # =============== NORMAL QA MODE (Adaptive Answer) ===============
+        # =============== NORMAL QA MODE ===============
         docs = self.vectorstore.similarity_search(
             query,
             k=15,
@@ -465,9 +477,14 @@ Do not omit any requirements, just adjust the depth of each item.
         for d in docs[:12]:
             ctx += f"[{d.metadata.get('header', 'SRD Section')}]\n{d.page_content}\n---\n"
 
-        #SEMANTIC PROMPT for QA
-        prompt = f"""
-You are a Senior Project Architect.
+        # ----------------------------------------------------
+        # MODE SWITCH: QA
+        # ----------------------------------------------------
+        if mode == "architect":
+            # PRO MODE: Senior Architect
+            prompt = f"""
+You are a Senior Project Architect and Lead Developer.
+**MODE: PRO / SENIOR ARCHITECT**
 
 CONTEXT:
 {ctx}
@@ -475,11 +492,29 @@ CONTEXT:
 USER QUERY: "{query}"
 
 INSTRUCTIONS:
-Answer the USER QUERY based strictly on the CONTEXT above.
-- **Analyze the user's intent:** If they ask for a high-level overview, summarize. If they ask for specific implementation details, be exhaustive and technical.
-- **Structure:** Use Markdown (##, **) to make the answer readable.
-- **Missing Info:** If the context is insufficient, state clearly what is missing.
+1. **Depth**: Provide a COMPREHENSIVE, technical, and detailed answer.
+2. **Global Knowledge**: You are encouraged to apply [GLOBAL_KNOWLEDGE] rules (if present in context) to critique or enhance the project requirements.
+3. **Structure**: Use headers, bullet points, and bold text extensively.
+4. **Advice**: If the SRD is missing a standard security or architectural pattern, point it out.
 """
+        else:
+            # STANDARD MODE: Adaptive
+            prompt = f"""
+You are a Senior Project Architect.
+**MODE: ADAPTIVE / STANDARD**
+
+CONTEXT:
+{ctx}
+
+USER QUERY: "{query}"
+
+INSTRUCTIONS:
+Answer the USER QUERY based strictly on the CONTEXT.
+- **Analyze Intent**: If the user asks for a summary, keep it brief. If they ask for details, go deep.
+- **Scope**: Focus primarily on the Project Documents. Only use Global Knowledge if the user explicitly asks for "advice" or "best practices".
+- **Clarity**: Prioritize a clear, direct answer over a long one unless detailed technical info is requested.
+"""
+
         return claude.client.messages.create(
             model=claude.model,
             max_tokens=3000,
