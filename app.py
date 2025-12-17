@@ -59,7 +59,6 @@ async def start():
                 return
             project_name = project_res["output"]
 
-            # 1. Ask for Learning Permission
             learn_res = await cl.AskActionMessage(
                 content="Allow this chat to be saved/learned for improving the bot?",
                 actions=[
@@ -69,19 +68,6 @@ async def start():
             ).send()
             learning_enabled = bool(learn_res["payload"]["v"]) if learn_res else True
 
-            # 2. NEW: Select Persona / Mode
-            mode_res = await cl.AskActionMessage(
-                content="Select the **AI Persona** for this session:",
-                actions=[
-                    cl.Action(name="standard", payload={"v": "standard"}, label="🤖 Adaptive (Standard)"),
-                    cl.Action(name="architect", payload={"v": "architect"}, label="🧠 Senior Architect (Pro)"),
-                ],
-            ).send()
-            # Default to standard if nothing selected
-            persona_mode = mode_res["payload"]["v"] if mode_res else "standard"
-            session.set("persona_mode", persona_mode)
-
-            # Create Chat
             chat = Chat(user_id=user_id, project_name=project_name, learning_enabled=learning_enabled)
             db.add(chat)
             db.commit()
@@ -91,12 +77,9 @@ async def start():
 
             engine = SmartKnowledgeBase(chroma_dir="chroma_global_db")
             engine.set_current_project(project_name)
-            engine.set_current_chat(chat.id)
-            engine.set_current_user(user_id)
+            engine.set_current_chat(chat.id)     # ✅ NEW
+            engine.set_current_user(user_id)     # ✅ NEW
             session.set("engine", engine)
-
-            if persona_mode == "architect":
-                await cl.Message(content="🧠 **Senior Architect Mode Enabled**: Expect detailed, technical, and comprehensive answers.").send()
 
             await run_ingestion(engine)
 
@@ -112,14 +95,11 @@ async def start():
 
             session.set("chat_id", chat.id)
             session.set("learning_enabled", chat.learning_enabled)
-            
-            # Default to standard on resume, or you could add a prompt here too
-            session.set("persona_mode", "standard") 
 
             engine = SmartKnowledgeBase(chroma_dir="chroma_global_db")
             engine.set_current_project(chat.project_name)
-            engine.set_current_chat(chat.id)
-            engine.set_current_user(user_id)
+            engine.set_current_chat(chat.id)     # ✅ NEW
+            engine.set_current_user(user_id)     # ✅ NEW
             session.set("engine", engine)
 
             # Restore history
@@ -216,9 +196,6 @@ async def main(message: cl.Message):
     try:
         engine: SmartKnowledgeBase = session.get("engine")
         chat_id = session.get("chat_id")
-        
-        # GET THE CHOSEN MODE
-        persona_mode = session.get("persona_mode", "standard")
 
         if not engine or not chat_id:
             await cl.Message(content="⚠️ Session error. Please refresh.").send()
@@ -228,12 +205,8 @@ async def main(message: cl.Message):
         db.add(Message(chat_id=chat_id, role="user", content=message.content))
         db.commit()
 
-        # Answer - PASS MODE TO ENGINE
-        response = await cl.make_async(engine.generate_smart_response)(
-            message.content, 
-            claude, 
-            mode=persona_mode
-        )
+        # Answer
+        response = await cl.make_async(engine.generate_smart_response)(message.content, claude)
 
         # Save assistant msg
         db.add(Message(chat_id=chat_id, role="assistant", content=response))
@@ -275,7 +248,7 @@ async def on_correct(action):
         if not res:
             return
 
-        # Always store correction text in DB
+        # Always store correction text in DB (audit trail)
         db.add(Message(chat_id=chat_id, role="user_feedback", content=res["output"]))
         db.commit()
 
