@@ -141,14 +141,13 @@ class DiagramInterpreter:
                         self._anthropic = Anthropic(api_key=api_key)
 
                 if self._anthropic:
-                    # ✅ FIXED MODEL NAME
                     safe_image = resize_for_claude(image)
                     buf = io.BytesIO()
                     safe_image.convert("RGB").save(buf, format="JPEG", quality=85)
                     b64 = base64.b64encode(buf.getvalue()).decode()
 
                     resp = self._anthropic.messages.create(
-                        model="claude-3-5-sonnet-20240620", 
+                        model="claude-sonnet-4-5-20250929", 
                         max_tokens=600,
                         temperature=0.2,
                         messages=[
@@ -222,7 +221,7 @@ class SmartKnowledgeBase(SRDChatbotEngine):
         if not self.current_user_id:
             raise RuntimeError("User not set. Call set_current_user(...) first.")
 
-    # ✅ UPDATED SCOPE TO INCLUDE GLOBAL KNOWLEDGE
+    #SCOPE INCLUDES GLOBAL KNOWLEDGE
     def _where_scope(self) -> dict:
         return {
             "$or": [
@@ -379,17 +378,18 @@ class SmartKnowledgeBase(SRDChatbotEngine):
         return "functional"
 
     # ------------------------------
-    # SMART RESPONSE (CHAT-ISOLATED)
+    # SMART RESPONSE (SEMANTICALLY ADAPTIVE)
     # ------------------------------
     def generate_smart_response(self, query: str, claude: ClaudeAnswerer) -> str:
         self._require_scope()
 
         intent = self.detect_intent(query)
 
-        # =============== ENUMERATION MODE ===============
+        # =============== ENUMERATION MODE (Adaptive List) ===============
         if intent == "enumeration":
             req_type = self.detect_requirement_type(query)
 
+            # (Standard retrieval logic)
             raw = self.vectorstore.get(
                 where={
                     "$and": [
@@ -400,10 +400,9 @@ class SmartKnowledgeBase(SRDChatbotEngine):
                     ]
                 }
             )
-
             docs = raw.get("documents", []) or []
 
-            # Fallback to general if specific type empty
+            # Fallback logic...
             if not docs and req_type == "nonfunctional":
                 raw2 = self.vectorstore.get(
                     where={
@@ -424,26 +423,35 @@ class SmartKnowledgeBase(SRDChatbotEngine):
 
             title = "FUNCTIONAL REQUIREMENTS" if req_type == "functional" else "NON-FUNCTIONAL REQUIREMENTS"
 
+            # SEMANTIC PROMPT: We tell Claude to be the judge of the query submitted by the user instead of being hardcoded by us.
             prompt = f"""
-You are a Senior Project Architect analyzing a Software Requirements Document (SRD).
+You are a Senior Project Architect.
 
-Your task is to provide a DETAILED and COMPREHENSIVE list of the {title} found below.
-1. Return a numbered list.
-2. For each requirement, preserve the full detail and context provided in the source.
-3. Do not summarize heavily; strictly output the requirements as defined.
-4. If duplicates exist, keep only one copy but maintain the most detailed version.
-
-REQUIREMENTS SOURCE:
+CONTEXT (The Requirements):
 {chr(10).join(docs)}
+
+USER QUERY: "{query}"
+
+TASK:
+List the {title} found in the context above.
+
+CRITICAL INSTRUCTION ON LENGTH:
+Use your semantic understanding of the USER QUERY to determine the output format:
+1. **Brevity**: If the user asks for "just a list", "titles only", "briefly", or "no explanation", output ONLY the ID and Name (e.g., "FR-01: User Login").
+2. **Detail**: If the user asks for "details", "full requirements", "comprehensive", or "explain", provide the full text/rationale for each.
+3. **Default**: If the intent is neutral (e.g., "What are the requirements?"), provide the ID, Name, and a 1-sentence summary.
+
+Do not omit any requirements, just adjust the depth of each item.
 """
+            # We keep max_tokens HIGH (4000) to allow detail IF the semantic check decides it's needed.
             return claude.client.messages.create(
                 model=claude.model,
-                max_tokens=2500,
+                max_tokens=4000,
                 temperature=0.2,
                 messages=[{"role": "user", "content": prompt}],
             ).content[0].text
 
-        # =============== NORMAL QA MODE ===============
+        # =============== NORMAL QA MODE (Adaptive Answer) ===============
         docs = self.vectorstore.similarity_search(
             query,
             k=15,
@@ -457,28 +465,24 @@ REQUIREMENTS SOURCE:
         for d in docs[:12]:
             ctx += f"[{d.metadata.get('header', 'SRD Section')}]\n{d.page_content}\n---\n"
 
+        #SEMANTIC PROMPT for QA
         prompt = f"""
-You are a Senior Project Architect and Lead Developer.
-
-Provide a COMPREHENSIVE and DETAILED answer based strictly on the SRD context below.
-
-Guidelines:
-1. **Depth**: Explain concepts and requirements in detail.
-2. **Structure**: Use Markdown headers (##), bullet points, and bold text.
-3. **Completeness**: Cover all aspects found in the context.
-4. **Context**: Cite specific rules or logic from the text.
-
-If the context does not support the answer, explicitly state what is missing.
+You are a Senior Project Architect.
 
 CONTEXT:
 {ctx}
 
-QUESTION:
-{query}
+USER QUERY: "{query}"
+
+INSTRUCTIONS:
+Answer the USER QUERY based strictly on the CONTEXT above.
+- **Analyze the user's intent:** If they ask for a high-level overview, summarize. If they ask for specific implementation details, be exhaustive and technical.
+- **Structure:** Use Markdown (##, **) to make the answer readable.
+- **Missing Info:** If the context is insufficient, state clearly what is missing.
 """
         return claude.client.messages.create(
             model=claude.model,
-            max_tokens=2500,
+            max_tokens=3000,
             temperature=0.3,
             messages=[{"role": "user", "content": prompt}],
         ).content[0].text
